@@ -1,0 +1,132 @@
+services:
+  # ── Frontend ─────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: useorigin-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:4000
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - useorigin-net
+    restart: unless-stopped
+
+  # ── Backend ──────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: useorigin-backend
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=development
+      - PORT=4000
+      - DB_HOST=database
+      - DB_PORT=5432
+      - DB_NAME=${POSTGRES_DB}
+      - DB_USER=${POSTGRES_USER}
+      - DB_PASSWORD=${POSTGRES_PASSWORD}
+      - TELLER_APPLICATION_ID=${TELLER_APPLICATION_ID}
+      - TELLER_ENVIRONMENT=${TELLER_ENVIRONMENT}
+      - TELLER_CERT_PATH=/app/certs/certificate.pem
+      - TELLER_KEY_PATH=/app/certs/private_key.pem
+      - OLLAMA_BASE_URL=http://llm-engine:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3}
+    volumes:
+      - ./certs:/app/certs:ro
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "node", "-e", "require('http').get('http://localhost:4000/api/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1) })" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - useorigin-net
+    restart: unless-stopped
+
+  # ── PostgreSQL Database ──────────────────────────────────
+  database:
+    image: postgres:16-alpine
+    container_name: useorigin-db
+    # No host-port exposure — internal network only
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - useorigin-net
+    restart: unless-stopped
+
+  # ── pgAdmin (optional DB browser) ───────────────────────
+  db-admin:
+    image: dpage/pgadmin4:latest
+    container_name: useorigin-pgadmin
+    ports:
+      - "5050:80"
+    env_file:
+      - .env
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_EMAIL}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD}
+      - PGADMIN_CONFIG_SERVER_MODE=False
+    depends_on:
+      database:
+        condition: service_healthy
+    networks:
+      - useorigin-net
+    restart: unless-stopped
+
+  # ── Ollama (Local LLM Engine) ────────────────────────────
+  llm-engine:
+    image: ollama/ollama:latest
+    container_name: useorigin-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    # Uncomment for NVIDIA GPU passthrough:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    networks:
+      - useorigin-net
+    restart: unless-stopped
+
+# ── Shared Network ──────────────────────────────────────────
+networks:
+  useorigin-net:
+    driver: bridge
+    internal: false # services need outbound access for Teller and container networking
+
+# ── Persistent Volumes ──────────────────────────────────────
+volumes:
+  pgdata:
+    driver: local
+  ollama-models:
+    driver: local
